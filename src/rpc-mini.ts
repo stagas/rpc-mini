@@ -1,6 +1,34 @@
+import { Ctor } from 'everyday-types'
+import { Getter } from 'proxy-toolkit'
+
 export type Rpc = (method: string, ...args: any[]) => any
 
-export const rpc = (port: MessagePort, api: Record<string, (...args: any[]) => Promise<any>> = {}): Rpc => {
+const defaultTransferables: Ctor[] = [
+  typeof OffscreenCanvas !== 'undefined' ? OffscreenCanvas : void 0,
+  typeof MessagePort !== 'undefined' ? MessagePort : void 0
+].filter(Boolean) as Ctor[]
+
+export const rpc = <T = any>(port: MessagePort, api: Record<string, (...args: any[]) => Promise<any>> = {}, transferables: Ctor[] = defaultTransferables) => {
+
+  const xfer = (args: any[], transferables: Ctor[]) => args.reduce((p, n) => {
+    if (typeof n === 'object') {
+      if (transferables.some((ctor) =>
+        n instanceof ctor)) {
+        p.push(n)
+      } else
+        for (const key in n) {
+          if (
+            n[key] &&
+            transferables.some((ctor) =>
+              n[key] instanceof ctor)
+          ) {
+            p.push(n[key])
+          }
+        }
+    }
+    return p
+  }, [] as Transferable[])
+
   let callbackId = 0
   const calls = new Map<number, { resolve: (result: any) => void; reject: (error: Error) => void }>()
 
@@ -11,7 +39,7 @@ export const rpc = (port: MessagePort, api: Record<string, (...args: any[]) => P
       let result: any
       try {
         result = await api[data.method](...data.args)
-        port.postMessage({ cid, result })
+        port.postMessage({ cid, result }, xfer([result], transferables))
       } catch (error) {
         port.postMessage({ cid, error })
       }
@@ -30,12 +58,20 @@ export const rpc = (port: MessagePort, api: Record<string, (...args: any[]) => P
 
   const call = (method: string, ...args: any[]) => {
     const cid = callbackId++
+
     const promise = new Promise<MessageEvent<any>>((resolve, reject) => {
       calls.set(cid, { resolve, reject })
     })
-    port.postMessage({ method, args, cid })
+
+    port.postMessage(
+      { method, args, cid },
+      xfer(args, transferables)
+    )
+
     return promise
   }
 
-  return call
+  const getter = Getter(key => call.bind(null, key), call) as unknown as Rpc & T
+
+  return getter
 }
